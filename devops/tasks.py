@@ -1,8 +1,9 @@
 import random
 import string
+import tempfile
 from pathlib import Path
 from shutil import rmtree
-from typing import List
+from typing import List, Mapping
 
 import pytimeparse
 import yaml
@@ -443,6 +444,45 @@ def _revert_unchanged_secrets(
     return yaml.safe_dump(new_sealed_content)
 
 
+def update_secret(env: str, file: str, key: str, value: str):
+    """
+
+    :param env:
+    :param file:
+    :param key:
+    :param value:
+    :return:
+    """
+    # Validate env
+    load_env_settings(env)
+
+    label(logger.info, f"Sealing secret for {env}")
+
+    secrets_pem = secrets_pem_path(env=env)
+
+    file_path = Path("envs") / env / "secrets" / file
+    file_content = file_path.read_text(encoding="utf-8")
+    sealed_secrets = yaml.safe_load(file_content)
+
+    scope = get_sealed_secrets_scope(sealed_secrets)
+    secrets_namespace = sealed_secrets["metadata"]["namespace"]
+    secrets_name = sealed_secrets["metadata"]["name"]
+
+    logger.info(f"Updating '{key}' in {file_path}")
+
+    new_sealed_value = kube_seal_value(
+        value=value,
+        cert=secrets_pem,
+        secrets_name=secrets_name,
+        secrets_namespace=secrets_namespace,
+        scope=scope,
+    )
+
+    sealed_secrets["spec"]["encryptedData"][key] = new_sealed_value
+    file_content = yaml.safe_dump(sealed_secrets)
+    file_path.write_text(file_content, encoding="utf-8")
+
+
 def base64_decode_secrets(content: str) -> str:
     """
     Base64 decode a Kubernetes Secret yaml file
@@ -537,3 +577,75 @@ def kube_seal(content: str, cert: Path) -> str:
     )
 
     return result.stdout.decode(encoding="utf-8").rstrip() + "\n"
+
+
+def kube_seal_value(
+    value: str,
+    cert: Path,
+    secrets_name: str,
+    secrets_namespace: str = "default",
+    scope: str = "strict",
+) -> str:
+    """
+    Encrypt given single value using kubeseal.
+
+    :param value: The value to be encrypted.
+    :param Path cert: Certificate / public key file to use for encryption.
+    :param secrets_name: The name of the Secret (metadata.name).
+    :param secrets_namespace: The namespace of the Secret (metadata.namespace).
+    :param scope: The scope of the sealed secret: strict, namespace-wide or
+    cluster-wide. Defaults to strict.
+    :return: The encrypted value.
+    """
+    value = normalize_line_endings(value)
+    value_bytes = value.encode("utf-8")
+
+    with tempfile.NamedTemporaryFile() as tmp_file:
+        tmp_file.write(value_bytes)
+        tmp_file.flush()
+
+        result = run(
+            [
+                "kubeseal",
+                "--raw",
+                "--from-file",
+                tmp_file.name,
+                "--scope",
+                scope,
+                "--namespace",
+                secrets_namespace,
+                "--name",
+                secrets_name,
+                "--cert",
+                cert,
+            ]
+        )
+    new_sealed_value = result.stdout.decode(encoding="utf-8").strip()
+    return new_sealed_value
+
+
+def get_sealed_secrets_scope(content: Mapping) -> str:
+    """
+    Extract the scope of a sealed secret.
+
+    :param content: The content of the SealedSecrets file, as a dict/mapping. Could for
+    example have been loaded by ruamel.yaml or PyYAML.
+    :return: The scope of the sealed secret: strict, namespace-wide or
+    cluster-wide.
+    """
+    if content["kind"] != "SealedSecret":
+        raise ValueError("Provided content is not of kind SealedSecret")
+    if content["apiVersion"] != "bitnami.com/v1alpha1":
+        raise NotImplementedError(
+            f"Unsupported apiVersion version {content['apiVersion']}"
+        )
+
+    annotations = content["metadata"].get("annotations", {})
+    if bool(annotations.get("sealedsecrets.bitnami.com/cluster-wide")):
+        scope = "cluster-wide"
+    elif bool(annotations.get("sealedsecrets.bitnami.com/namespace-wide")):
+        scope = "namespace-wide"
+    else:
+        scope = "strict"
+
+    return scope

@@ -431,3 +431,27 @@ def seal_secrets(ctx, env, all_envs=False, only_changed=False):
 
     for env in envs:
         devops.tasks.seal_secrets(env=env, only_changed=only_changed)
+
+
+@task(iterable=["env"])
+def update_secret(ctx, env, file, key, value, all_envs=False):
+    """
+    Base64 encodes and seals a new secret into the desired secrets file.
+
+    Examples:
+    poetry run invoke update-secret --env staging --file 01-pipeline-agent.yaml --key foo --value bar
+
+    :param invoke.Context ctx: The invoke context.
+    :param List[str] env: A list of the environments.
+    :param str file: The file within the env/{envs}/secrets/ to update.
+    :param str key: The key under which to store the new secret.
+    :param str value: The value to encrypt and store as the actual secret.
+    :param bool all_envs: Use all envs.
+    """
+    if all_envs:
+        envs = list_envs()
+    else:
+        envs = {e.strip() for es in env for e in es.split(",")}
+
+    for env in envs:
+        devops.tasks.update_secret(env=env, file=file, key=key, value=value)
